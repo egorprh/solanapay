@@ -644,6 +644,7 @@ class SolanaPayments:
         Получение цены токена через CoinGecko API
         
         Получает актуальную цену указанного токена в USD.
+        Для USD токенов (USDC, USDT) возвращает фиксированную цену 1.0.
         
         Args:
             token: Тип токена (sol, usdc, usdt)
@@ -652,38 +653,37 @@ class SolanaPayments:
             Цена токена в USD
         """
         try:
-            # Маппинг токенов на CoinGecko ID
-            token_mapping = {
-                'sol': 'solana',
-                'usdc': 'usd-coin',
-                'usdt': 'tether'
-            }
+            # Для USD токенов возвращаем фиксированную цену
+            if token in ['usdc', 'usdt']:
+                logger.info(f"USD token {token}: $1.00")
+                return 1.0
             
-            coin_id = token_mapping.get(token)
-            if not coin_id:
-                raise ValueError(f"Unsupported token: {token}")
+            # Для SOL получаем актуальную цену через API
+            if token == 'sol':
+                # Создаем сессию с отключенной проверкой SSL для тестирования
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    url = f"{Config.COINGECKO_API_URL}/simple/price"
+                    params = {
+                        'ids': 'solana',
+                        'vs_currencies': 'usd'
+                    }
+                    
+                    async with session.get(url, params=params, timeout=Config.COINGECKO_TIMEOUT) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            price = data['solana']['usd']
+                            logger.info(f"Token price {token}: ${price}")
+                            return float(price)
+                        else:
+                            raise Exception(f"CoinGecko API error: {response.status}")
             
-            # Создаем сессию с отключенной проверкой SSL для тестирования
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                url = f"{Config.COINGECKO_API_URL}/simple/price"
-                params = {
-                    'ids': coin_id,
-                    'vs_currencies': 'usd'
-                }
-                
-                async with session.get(url, params=params, timeout=Config.COINGECKO_TIMEOUT) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        price = data[coin_id]['usd']
-                        logger.info(f"Token price {token}: ${price}")
-                        return float(price)
-                    else:
-                        raise Exception(f"CoinGecko API error: {response.status}")
+            # Для неизвестных токенов
+            raise ValueError(f"Unsupported token: {token}")
                         
         except Exception as e:
             logger.error(f"Failed to get token price for {token}: {e}")
-            # Возвращаем примерную цену в случае ошибки
+            # Возвращаем fallback цены в случае ошибки
             fallback_prices = {
                 'sol': 250.0,  # TODO Более актуальная цена SOL
                 'usdc': 1.0,
