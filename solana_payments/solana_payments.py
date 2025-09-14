@@ -84,13 +84,13 @@ class Payment(BaseModel):
     Модель данных для платежа в сети Solana
     
     Представляет полную информацию о платеже включая идентификатор,
-    тип токена, адрес кошелька, статус и суммы.
+    тип токена, адрес кошелька, статус и суммы. Поддерживает частичные платежи.
     """
     
     payment_id: str = Field(..., description="Уникальный идентификатор платежа")
     token: str = Field(..., description="Тип токена (sol, usdc, usdt)")
     payment_address: str = Field(..., description="Адрес кошелька для получения платежа")
-    status: str = Field(default="pending", description="Статус платежа (pending, paid, cancelled)")
+    status: str = Field(default="pending", description="Статус платежа (pending, paid, cancelled, partial, overpaid)")
     payment_amount: Optional[float] = Field(None, description="Количество полученных токенов")
     outcome_amount: Optional[float] = Field(None, description="Эквивалент в USD")
     created_at: datetime = Field(default_factory=datetime.now, description="Время создания платежа")
@@ -98,6 +98,12 @@ class Payment(BaseModel):
     initial_balance: float = Field(..., description="Начальный баланс кошелька")
     transaction_signature: Optional[str] = Field(None, description="Подпись Solana транзакции")
     slot: Optional[int] = Field(None, description="Слот Solana блокчейна")
+    
+    # Новые поля для поддержки частичных платежей
+    expected_amount: Optional[float] = Field(None, description="Ожидаемая сумма платежа")
+    paid_amount: float = Field(default=0.0, description="Уже оплаченная сумма")
+    remaining_amount: Optional[float] = Field(None, description="Оставшаяся к доплате сумма")
+    partial_payments: List[Dict] = Field(default_factory=list, description="История частичных платежей")
     
     @validator('token')
     def validate_token(cls, v):
@@ -110,7 +116,7 @@ class Payment(BaseModel):
     @validator('status')
     def validate_status(cls, v):
         """Валидация статуса платежа"""
-        allowed_statuses = ['pending', 'paid', 'cancelled']
+        allowed_statuses = ['pending', 'paid', 'cancelled', 'partial', 'overpaid']
         if v.lower() not in allowed_statuses:
             raise ValueError(f'Status must be one of {allowed_statuses}')
         return v.lower()
@@ -224,16 +230,18 @@ class SolanaPayments:
             logger.error(f"Connection test failed: {e}")
             raise
     
-    async def create_payment(self, payment_id: str, token: str) -> Dict[str, Any]:
+    async def create_payment(self, payment_id: str, token: str, expected_amount: Optional[float] = None) -> Dict[str, Any]:
         """
         Создание нового платежа
         
         Создает новый платеж с указанными параметрами, выделяет свободный
         кошелек из пула, фиксирует начальный баланс и сохраняет платеж в БД.
+        Поддерживает создание платежей с ожидаемой суммой для частичных платежей.
         
         Args:
             payment_id: Уникальный идентификатор платежа
             token: Тип токена (sol, usdc, usdt)
+            expected_amount: Ожидаемая сумма платежа (опционально, для частичных платежей)
             
         Returns:
             Dict с данными созданного платежа
@@ -263,7 +271,9 @@ class SolanaPayments:
                 payment_id=payment_id,
                 token=token,
                 payment_address=payment_address,
-                initial_balance=initial_balance
+                initial_balance=initial_balance,
+                expected_amount=round(expected_amount, 8) if expected_amount else None,
+                remaining_amount=round(expected_amount, 8) if expected_amount else None
             )
             
             # Сохранение в MongoDB
@@ -307,26 +317,75 @@ class SolanaPayments:
             payment = Payment(**payment_data)
             logger.info(f"Found payment: {payment.status}")
             
-            # Если платеж уже обработан, возвращаем текущий статус
-            if payment.status != "pending":
+            # Если платеж уже завершен (paid, overpaid, cancelled), возвращаем текущий статус
+            if payment.status in ["paid", "overpaid", "cancelled"]:
+                logger.info(f"Payment already completed with status: {payment.status}")
                 return payment.dict()
+            
+            # Для pending и partial платежей проверяем новые поступления
+            logger.info(f"Checking for new payments on {payment.status} payment")
             
             # Проверка изменения баланса
             current_balance = await self._get_balance(payment.payment_address, payment.token)
-            balance_change = current_balance - payment.initial_balance
+            balance_change = round(current_balance - payment.initial_balance, 8)
             
             logger.info(f"Balance change: {balance_change} {payment.token}")
             
             # Если есть поступление средств
             if balance_change > 0:
+                logger.info(f"New payment detected: {balance_change} {payment.token}")
+                logger.info(f"Previous paid amount: {payment.paid_amount}, New balance change: {balance_change}")
+                
+                # Вычисляем новую оплаченную сумму с округлением
+                new_paid_amount = round(payment.paid_amount + balance_change, 8)
+                logger.info(f"New total paid amount: {new_paid_amount}")
+                
+                # Записываем частичный платеж с округлением
+                partial_payment = {
+                    "amount": round(balance_change, 8),
+                    "timestamp": datetime.now().isoformat(),
+                    "balance_after": current_balance
+                }
+                payment.partial_payments.append(partial_payment)
+                
+                # Обновляем суммы с округлением
+                payment.paid_amount = new_paid_amount
+                payment.initial_balance = current_balance  # Обновляем базовый баланс
+                logger.info(f"Updated initial_balance to: {current_balance}")
+                
                 # Получение цены токена
                 token_price = await self._get_token_price(payment.token)
-                outcome_amount = balance_change * token_price
+                payment.outcome_amount = round(new_paid_amount * token_price, 2)
                 
-                # Обновление статуса платежа
-                payment.status = "paid"
-                payment.payment_amount = round(balance_change, 8)
-                payment.outcome_amount = round(outcome_amount, 2)
+                # Определяем новый статус
+                if payment.expected_amount:
+                    payment.remaining_amount = round(max(0, payment.expected_amount - new_paid_amount), 8)
+                    logger.info(f"Status calculation: paid={new_paid_amount}, expected={payment.expected_amount}, remaining={payment.remaining_amount}")
+                    
+                    # Используем округление для сравнения из-за неточности float
+                    rounded_paid = round(new_paid_amount, 8)
+                    rounded_expected = round(payment.expected_amount, 8)
+                    logger.info(f"Rounded comparison: paid={rounded_paid}, expected={rounded_expected}")
+                    
+                    if rounded_paid >= rounded_expected:
+                        if rounded_paid > rounded_expected:
+                            payment.status = "overpaid"
+                            logger.info(f"Payment overpaid: {payment_id}, paid: {new_paid_amount}, expected: {payment.expected_amount}")
+                        else:
+                            payment.status = "paid"
+                            logger.info(f"Payment fully paid: {payment_id}")
+                        # Освобождаем кошелек только при полной оплате
+                        await self._release_wallet(payment.payment_address)
+                    else:
+                        payment.status = "partial"
+                        logger.info(f"Partial payment received: {payment_id}, paid: {new_paid_amount}, remaining: {payment.remaining_amount}")
+                else:
+                    # Если нет ожидаемой суммы, считаем любой платеж полным
+                    payment.status = "paid"
+                    payment.payment_amount = round(new_paid_amount, 8)
+                    await self._release_wallet(payment.payment_address)
+                    logger.info(f"Payment marked as paid (no expected amount): {payment_id}")
+                
                 payment.updated_at = datetime.now()
                 
                 # Сохранение в БД
@@ -334,11 +393,6 @@ class SolanaPayments:
                     {"payment_id": payment_id},
                     {"$set": payment.dict()}
                 )
-                
-                # Освобождение кошелька
-                await self._release_wallet(payment.payment_address)
-                
-                logger.info(f"Payment marked as paid: {payment_id}")
             
             return payment.dict()
             
@@ -376,7 +430,7 @@ class SolanaPayments:
             payment = Payment(**payment_data)
             
             # Проверка возможности отмены
-            if payment.status not in ["pending"]:
+            if payment.status not in ["pending", "partial"]:
                 logger.warning(f"Cannot cancel payment with status: {payment.status}")
                 return payment.dict()
             
@@ -419,11 +473,51 @@ class SolanaPayments:
         try:
             # Получение статуса платежа
             payment_data = await self.get_payment_status(payment_id)
-            return payment_data["status"] == "paid"
+            return payment_data["status"] in ["paid", "overpaid"]
             
         except Exception as e:
             logger.error(f"Failed to check payment {payment_id}: {e}")
             return False
+    
+    async def get_payment_summary(self, payment_id: str) -> Dict[str, Any]:
+        """
+        Получение детальной информации о платеже
+        
+        Возвращает сводную информацию о платеже, включая данные о частичных платежах.
+        
+        Args:
+            payment_id: Идентификатор платежа
+            
+        Returns:
+            Dict с детальной информацией о платеже
+        """
+        if not self.initialized:
+            raise Exception("SolanaPayments not initialized. Call initialize() first.")
+        
+        try:
+            payment_data = await self.get_payment_status(payment_id)
+            
+            summary = {
+                "payment_id": payment_data["payment_id"],
+                "status": payment_data["status"],
+                "token": payment_data["token"],
+                "payment_address": payment_data["payment_address"],
+                "expected_amount": payment_data.get("expected_amount"),
+                "paid_amount": payment_data.get("paid_amount", 0),
+                "remaining_amount": payment_data.get("remaining_amount", 0),
+                "outcome_amount": payment_data.get("outcome_amount", 0),
+                "partial_payments_count": len(payment_data.get("partial_payments", [])),
+                "can_continue_payment": payment_data["status"] == "partial",
+                "is_fully_paid": payment_data["status"] in ["paid", "overpaid"],
+                "created_at": payment_data["created_at"],
+                "updated_at": payment_data["updated_at"]
+            }
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Failed to get payment summary {payment_id}: {e}")
+            raise
     
     async def _get_available_wallet(self) -> Optional[str]:
         """
@@ -502,7 +596,7 @@ class SolanaPayments:
                 pubkey = Pubkey.from_string(address)
                 response = await self.solana_client.get_balance(pubkey)
                 balance_lamports = response.value
-                balance_sol = balance_lamports / 1e9  # Конвертация из lamports в SOL
+                balance_sol = round(balance_lamports / 1e9, 8)  # Конвертация из lamports в SOL с округлением
                 return balance_sol
                 
             else:
@@ -537,7 +631,7 @@ class SolanaPayments:
                 
                 # Конвертация с учетом decimals (обычно 6 для USDC/USDT)
                 decimals = 6  # Стандартное значение для USDC/USDT
-                balance_tokens = balance / (10 ** decimals)
+                balance_tokens = round(balance / (10 ** decimals), 8)
                 
                 return balance_tokens
                 
@@ -591,7 +685,7 @@ class SolanaPayments:
             logger.error(f"Failed to get token price for {token}: {e}")
             # Возвращаем примерную цену в случае ошибки
             fallback_prices = {
-                'sol': 25.0,  # Более актуальная цена SOL
+                'sol': 250.0,  # TODO Более актуальная цена SOL
                 'usdc': 1.0,
                 'usdt': 1.0
             }
@@ -667,18 +761,19 @@ async def initialize(config: Optional[Config] = None) -> None:
     await _payments_instance.initialize(config)
 
 
-async def create_payment(payment_id: str, token: str) -> Dict[str, Any]:
+async def create_payment(payment_id: str, token: str, expected_amount: Optional[float] = None) -> Dict[str, Any]:
     """
     Создание нового платежа
     
     Args:
         payment_id: Уникальный идентификатор платежа
         token: Тип токена (sol, usdc, usdt)
+        expected_amount: Ожидаемая сумма платежа (опционально, для частичных платежей)
         
     Returns:
         Dict с данными созданного платежа
     """
-    return await _payments_instance.create_payment(payment_id, token)
+    return await _payments_instance.create_payment(payment_id, token, expected_amount)
 
 
 async def get_payment_status(payment_id: str) -> Dict[str, Any]:
@@ -718,6 +813,19 @@ async def check_payment_received(payment_id: str) -> bool:
         True если платеж поступил, False в противном случае
     """
     return await _payments_instance.check_payment_received(payment_id)
+
+
+async def get_payment_summary(payment_id: str) -> Dict[str, Any]:
+    """
+    Получение детальной информации о платеже
+    
+    Args:
+        payment_id: Идентификатор платежа
+        
+    Returns:
+        Dict с детальной информацией о платеже
+    """
+    return await _payments_instance.get_payment_summary(payment_id)
 
 
 async def release_all_wallets() -> None:

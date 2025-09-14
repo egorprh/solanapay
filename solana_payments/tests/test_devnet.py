@@ -24,7 +24,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from solana_payments import initialize, create_payment, get_payment_status, cancel_payment, cleanup, Config
+from solana_payments import initialize, create_payment, get_payment_status, cancel_payment, cleanup, Config, get_payment_summary
 from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey as PublicKey
@@ -72,7 +72,7 @@ class DevnetTester:
             
             logger.info("💰 Checking wallet balance...")
             balance_response = await solana_client.get_balance(self.sender_keypair.pubkey())
-            balance_sol = balance_response.value / 10**9
+            balance_sol = round(balance_response.value / 10**9, 8)
             logger.info(f"💰 Wallet balance: {balance_sol} SOL")
             
             if balance_sol < 0.1:
@@ -85,6 +85,67 @@ class DevnetTester:
             logger.error(f"❌ Failed to setup test wallet: {e}")
             raise
     
+    async def cleanup_locked_wallets(self) -> None:
+        """Очистка всех заблокированных кошельков в Redis"""
+        try:
+            from solana_payments import SolanaPayments
+            
+            # Создаем временный экземпляр для доступа к Redis
+            temp_payments = SolanaPayments()
+            await temp_payments.initialize(self.config)
+            
+            # Получаем все заблокированные кошельки
+            locked_keys = await temp_payments.redis_client.keys("occupied_wallet:solana:*")
+            
+            if locked_keys:
+                logger.info(f"🔍 Found {len(locked_keys)} locked wallets")
+                
+                # Удаляем все заблокированные кошельки
+                for key in locked_keys:
+                    await temp_payments.redis_client.delete(key)
+                    wallet_address = key.decode('utf-8').split(':')[-1]
+                    logger.info(f"🔓 Released wallet: {wallet_address}")
+                
+                logger.info(f"✅ Released {len(locked_keys)} wallets")
+            else:
+                logger.info("✅ No locked wallets found")
+            
+            await temp_payments.cleanup()
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to cleanup locked wallets: {e}")
+    
+    async def check_and_fund_sender(self, required_amount: float = 0.5):
+        """Проверка и пополнение баланса отправителя"""
+        try:
+            solana_client = AsyncClient(self.config.SOLANA_RPC_URL)
+            sender_balance = await solana_client.get_balance(self.sender_keypair.pubkey())
+            sender_balance_sol = round(sender_balance.value / 10**9, 8)
+            
+            logger.info(f"💰 Current sender balance: {sender_balance_sol:.8f} SOL")
+            
+            if sender_balance_sol < required_amount:
+                logger.info(f"💸 Sender balance too low, requesting airdrop...")
+                # Запрашиваем airdrop
+                airdrop_amount = int(1.0 * 10**9)  # 1 SOL
+                signature = await solana_client.request_airdrop(
+                    self.sender_keypair.pubkey(), 
+                    airdrop_amount
+                )
+                logger.info(f"✅ Airdrop requested: {signature}")
+                
+                # Ждем подтверждения
+                await solana_client.confirm_transaction(signature)
+                
+                # Проверяем новый баланс
+                new_balance = await solana_client.get_balance(self.sender_keypair.pubkey())
+                new_balance_sol = round(new_balance.value / 10**9, 8)
+                logger.info(f"💰 New sender balance: {new_balance_sol:.8f} SOL")
+            else:
+                logger.info(f"✅ Sender has sufficient balance: {sender_balance_sol:.8f} SOL")
+                
+        except Exception as e:
+            logger.error(f"❌ Error checking/funding sender: {e}")
     
     async def send_sol_transaction(self, recipient_address: str, amount_sol: float) -> str:
         """
@@ -103,7 +164,15 @@ class DevnetTester:
             # Конвертируем SOL в lamports
             amount_lamports = int(amount_sol * 10**9)
             
+            # Проверяем баланс отправителя
+            sender_balance = await solana_client.get_balance(self.sender_keypair.pubkey())
+            sender_balance_sol = round(sender_balance.value / 10**9, 8)
+            
+            logger.info(f"💰 Sender balance: {sender_balance_sol:.8f} SOL")
             logger.info(f"📤 Sending {amount_sol} SOL to {recipient_address}")
+            
+            if sender_balance_sol < amount_sol:
+                raise Exception(f"Insufficient balance: {sender_balance_sol:.8f} SOL < {amount_sol} SOL")
             
             # Создаем инструкцию перевода
             transfer_instruction = transfer(
@@ -179,6 +248,9 @@ class DevnetTester:
         
         try:
             logger.info(f"\n🧪 Starting test: {test_name}")
+            
+            # 0. Проверка и пополнение баланса отправителя
+            await self.check_and_fund_sender(required_amount=0.2)
             
             # 1. Создание платежа
             payment_id = str(uuid.uuid4())
@@ -260,6 +332,51 @@ class DevnetTester:
         
         return results
     
+    async def test_partial_payments(self) -> List[Dict[str, Any]]:
+        """Тест частичных платежей"""
+        results = []
+        
+        # Тест 1: Частичный платеж (30% от ожидаемой суммы)
+        result1 = await self.test_partial_payment("Partial Payment Test (30%)", 0.1, 0.03)
+        results.append(result1)
+        
+        # Пауза между тестами
+        await asyncio.sleep(3)
+        
+        # Тест 2: Завершение частичного платежа (50% + 50%)
+        result2 = await self.test_complete_partial_payment("Complete Partial Payment Test", 0.1, 0.05, 0.05)
+        results.append(result2)
+        
+        # Пауза
+        await asyncio.sleep(3)
+        
+        # Тест 3: Переплата (120% от ожидаемой суммы)
+        result3 = await self.test_overpayment("Overpayment Test (120%)", 0.1, 0.12)
+        results.append(result3)
+        
+        # Пауза
+        await asyncio.sleep(3)
+        
+        # Тест 4: Отмена частично оплаченного платежа
+        result4 = await self.test_partial_payment_cancellation("Partial Payment Cancellation Test", 0.1, 0.04)
+        results.append(result4)
+        
+        # Пауза
+        await asyncio.sleep(3)
+        
+        # Тест 5: Частичный платеж с проверкой остатка
+        result5 = await self.test_partial_payment_with_remaining_balance("Partial Payment with Remaining Balance Test", 0.1, 0.07)
+        results.append(result5)
+        
+        # Пауза
+        await asyncio.sleep(3)
+        
+        # Тест 6: Частичный платеж с тремя транзакциями
+        result6 = await self.test_partial_payment_with_three_installments("Three-Installment Partial Payment Test", 0.1, 0.03, 0.04, 0.03)
+        results.append(result6)
+        
+        return results
+    
     async def test_cancellation(self) -> Dict[str, Any]:
         """Тест отмены платежа"""
         test_result = {
@@ -295,6 +412,694 @@ class DevnetTester:
         except Exception as e:
             test_result["error"] = str(e)
             logger.error(f"❌ Cancellation test failed: {e}")
+        
+        test_result["end_time"] = datetime.now().isoformat()
+        return test_result
+    
+    async def test_partial_payment(self, test_name: str, expected_amount: float, partial_amount: float) -> Dict[str, Any]:
+        """
+        Тест частичного платежа
+        
+        Args:
+            test_name: Название теста
+            expected_amount: Ожидаемая сумма платежа
+            partial_amount: Сумма частичного платежа
+            
+        Returns:
+            Результат теста
+        """
+        test_result = {
+            "test_name": test_name,
+            "start_time": datetime.now().isoformat(),
+            "success": False,
+            "error": None,
+            "payment_id": None,
+            "payment_address": None,
+            "transaction_signature": None,
+            "solscan_url": None,
+            "payment_data": None,
+            "status_checks": [],
+            "expected_amount": expected_amount,
+            "partial_amount": partial_amount
+        }
+        
+        try:
+            logger.info(f"\n🧪 Starting partial payment test: {test_name}")
+            logger.info(f"Expected: {expected_amount} SOL, Partial: {partial_amount} SOL")
+            
+            # 0. Проверка и пополнение баланса отправителя
+            await self.check_and_fund_sender(required_amount=0.2)
+            
+            # 1. Создание платежа с ожидаемой суммой
+            payment_id = str(uuid.uuid4())
+            logger.info(f"📝 Creating payment: {payment_id}")
+            
+            payment = await create_payment(payment_id, "sol", expected_amount=expected_amount)
+            test_result["payment_id"] = payment_id
+            test_result["payment_address"] = payment["payment_address"]
+            
+            logger.info(f"✅ Payment created: {payment['payment_address']}")
+            logger.info(f"Expected amount: {payment['expected_amount']} SOL")
+            
+            # 2. Проверка начального статуса
+            initial_status = await get_payment_status(payment_id)
+            test_result["status_checks"].append({
+                "check": "initial_status",
+                "status": initial_status["status"],
+                "expected_amount": initial_status.get("expected_amount"),
+                "paid_amount": initial_status.get("paid_amount", 0),
+                "remaining_amount": initial_status.get("remaining_amount"),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # 3. Отправка частичного платежа
+            logger.info(f"📤 Sending partial payment: {partial_amount} SOL...")
+            signature = await self.send_sol_transaction(payment["payment_address"], partial_amount)
+            test_result["transaction_signature"] = signature
+            test_result["solscan_url"] = f"https://solscan.io/tx/{signature}?cluster=devnet"
+            
+            # 4. Проверка статуса после частичного платежа
+            for attempt in range(5):
+                await asyncio.sleep(3)  # Ждем 3 секунды между проверками
+                
+                status = await get_payment_status(payment_id)
+                test_result["status_checks"].append({
+                    "check": f"after_partial_payment_attempt_{attempt + 1}",
+                    "status": status["status"],
+                    "expected_amount": status.get("expected_amount"),
+                    "paid_amount": status.get("paid_amount", 0),
+                    "remaining_amount": status.get("remaining_amount"),
+                    "outcome_amount": status.get("outcome_amount"),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                if status["status"] == "partial":
+                    logger.info(f"✅ Partial payment detected! Paid: {status.get('paid_amount')} SOL, Remaining: {status.get('remaining_amount')} SOL")
+                    test_result["payment_data"] = status
+                    test_result["success"] = True
+                    
+                    # Освобождаем кошелек для частичного платежа в тестах
+                    logger.info(f"🔓 Releasing wallet for partial payment test...")
+                    await cancel_payment(payment_id)
+                    break
+                else:
+                    logger.info(f"⏳ Payment status: {status['status']}... (attempt {attempt + 1}/5)")
+            
+            if not test_result["success"]:
+                test_result["error"] = f"Partial payment not detected. Status: {status['status']}"
+                logger.error("❌ Partial payment was not detected")
+            
+        except Exception as e:
+            test_result["error"] = str(e)
+            logger.error(f"❌ Partial payment test failed: {e}")
+            
+            # Освобождаем кошелек в случае исключения
+            if test_result.get("payment_id"):
+                logger.info(f"🔓 Releasing wallet due to exception...")
+                try:
+                    await cancel_payment(test_result["payment_id"])
+                except Exception as release_error:
+                    logger.warning(f"Failed to release wallet: {release_error}")
+        
+        test_result["end_time"] = datetime.now().isoformat()
+        return test_result
+    
+    async def test_complete_partial_payment(self, test_name: str, expected_amount: float, first_partial: float, second_partial: float) -> Dict[str, Any]:
+        """
+        Тест завершения частичного платежа (два платежа)
+        
+        Args:
+            test_name: Название теста
+            expected_amount: Ожидаемая сумма платежа
+            first_partial: Первая частичная сумма
+            second_partial: Вторая частичная сумма
+            
+        Returns:
+            Результат теста
+        """
+        test_result = {
+            "test_name": test_name,
+            "start_time": datetime.now().isoformat(),
+            "success": False,
+            "error": None,
+            "payment_id": None,
+            "payment_address": None,
+            "first_transaction_signature": None,
+            "second_transaction_signature": None,
+            "first_solscan_url": None,
+            "second_solscan_url": None,
+            "payment_data": None,
+            "status_checks": [],
+            "expected_amount": expected_amount,
+            "first_partial": first_partial,
+            "second_partial": second_partial
+        }
+        
+        try:
+            logger.info(f"\n🧪 Starting complete partial payment test: {test_name}")
+            logger.info(f"Expected: {expected_amount} SOL, First: {first_partial} SOL, Second: {second_partial} SOL")
+            
+            # 1. Создание платежа с ожидаемой суммой
+            payment_id = str(uuid.uuid4())
+            logger.info(f"📝 Creating payment: {payment_id}")
+            
+            payment = await create_payment(payment_id, "sol", expected_amount=expected_amount)
+            test_result["payment_id"] = payment_id
+            test_result["payment_address"] = payment["payment_address"]
+            
+            logger.info(f"✅ Payment created: {payment['payment_address']}")
+            
+            # 2. Первый частичный платеж
+            logger.info(f"📤 Sending first partial payment: {first_partial} SOL...")
+            first_signature = await self.send_sol_transaction(payment["payment_address"], first_partial)
+            test_result["first_transaction_signature"] = first_signature
+            test_result["first_solscan_url"] = f"https://solscan.io/tx/{first_signature}?cluster=devnet"
+            
+            # 3. Проверка статуса после первого платежа
+            await asyncio.sleep(5)  # Ждем обработки
+            status_after_first = await get_payment_status(payment_id)
+            test_result["status_checks"].append({
+                "check": "after_first_partial",
+                "status": status_after_first["status"],
+                "paid_amount": status_after_first.get("paid_amount", 0),
+                "remaining_amount": status_after_first.get("remaining_amount"),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            if status_after_first["status"] != "partial":
+                test_result["error"] = f"Expected 'partial' status after first payment, got '{status_after_first['status']}'"
+                logger.error(f"❌ Unexpected status after first payment: {status_after_first['status']}")
+                return test_result
+            
+            logger.info(f"✅ First partial payment confirmed: {status_after_first.get('paid_amount')} SOL paid")
+            
+            # 4. Второй частичный платеж
+            logger.info(f"📤 Sending second partial payment: {second_partial} SOL...")
+            second_signature = await self.send_sol_transaction(payment["payment_address"], second_partial)
+            test_result["second_transaction_signature"] = second_signature
+            test_result["second_solscan_url"] = f"https://solscan.io/tx/{second_signature}?cluster=devnet"
+            
+            logger.info(f"✅ Second transaction sent: {second_signature}")
+            
+            # 5. Проверка финального статуса
+            for attempt in range(8):  # Увеличиваем количество попыток
+                await asyncio.sleep(5)  # Увеличиваем время ожидания
+                
+                final_status = await get_payment_status(payment_id)
+                test_result["status_checks"].append({
+                    "check": f"after_second_partial_attempt_{attempt + 1}",
+                    "status": final_status["status"],
+                    "paid_amount": final_status.get("paid_amount", 0),
+                    "remaining_amount": final_status.get("remaining_amount"),
+                    "outcome_amount": final_status.get("outcome_amount"),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                if final_status["status"] in ["paid", "overpaid"]:
+                    logger.info(f"✅ Payment completed! Status: {final_status['status']}, Total paid: {final_status.get('paid_amount')} SOL")
+                    test_result["payment_data"] = final_status
+                    test_result["success"] = True
+                    break
+                else:
+                    logger.info(f"⏳ Payment status: {final_status['status']}... (attempt {attempt + 1}/8)")
+                    logger.info(f"   Paid: {final_status.get('paid_amount', 0)} SOL, Remaining: {final_status.get('remaining_amount', 0)} SOL")
+            
+            if not test_result["success"]:
+                test_result["error"] = f"Payment not completed. Final status: {final_status['status']}"
+                logger.error("❌ Payment was not completed")
+                
+                # Освобождаем кошелек в случае неудачи
+                logger.info(f"🔓 Releasing wallet due to test failure...")
+                try:
+                    await cancel_payment(payment_id)
+                except Exception as e:
+                    logger.warning(f"Failed to release wallet: {e}")
+            
+        except Exception as e:
+            test_result["error"] = str(e)
+            logger.error(f"❌ Complete partial payment test failed: {e}")
+            
+            # Освобождаем кошелек в случае исключения
+            if test_result.get("payment_id"):
+                logger.info(f"🔓 Releasing wallet due to exception...")
+                try:
+                    await cancel_payment(test_result["payment_id"])
+                except Exception as release_error:
+                    logger.warning(f"Failed to release wallet: {release_error}")
+        
+        test_result["end_time"] = datetime.now().isoformat()
+        return test_result
+    
+    async def test_partial_payment_with_three_installments(self, test_name: str, expected_amount: float, first_partial: float, second_partial: float, third_partial: float) -> Dict[str, Any]:
+        """
+        Тест частичного платежа с тремя транзакциями
+        
+        Args:
+            test_name: Название теста
+            expected_amount: Ожидаемая сумма платежа
+            first_partial: Первая частичная сумма
+            second_partial: Вторая частичная сумма
+            third_partial: Третья частичная сумма
+            
+        Returns:
+            Результат теста
+        """
+        test_result = {
+            "test_name": test_name,
+            "start_time": datetime.now().isoformat(),
+            "success": False,
+            "error": None,
+            "payment_id": None,
+            "payment_address": None,
+            "first_transaction_signature": None,
+            "second_transaction_signature": None,
+            "third_transaction_signature": None,
+            "first_solscan_url": None,
+            "second_solscan_url": None,
+            "third_solscan_url": None,
+            "payment_data": None,
+            "status_checks": [],
+            "expected_amount": expected_amount,
+            "first_partial": first_partial,
+            "second_partial": second_partial,
+            "third_partial": third_partial
+        }
+        
+        try:
+            logger.info(f"\n🧪 Starting three-installment partial payment test: {test_name}")
+            logger.info(f"Expected: {expected_amount} SOL, First: {first_partial} SOL, Second: {second_partial} SOL, Third: {third_partial} SOL")
+            
+            # 0. Проверка и пополнение баланса отправителя
+            await self.check_and_fund_sender(required_amount=0.3)
+            
+            # 1. Создание платежа с ожидаемой суммой
+            payment_id = str(uuid.uuid4())
+            logger.info(f"📝 Creating payment: {payment_id}")
+            
+            payment = await create_payment(payment_id, "sol", expected_amount=expected_amount)
+            test_result["payment_id"] = payment_id
+            test_result["payment_address"] = payment["payment_address"]
+            
+            logger.info(f"✅ Payment created: {payment['payment_address']}")
+            
+            # 2. Первый частичный платеж
+            logger.info(f"📤 Sending first partial payment: {first_partial} SOL...")
+            first_signature = await self.send_sol_transaction(payment["payment_address"], first_partial)
+            test_result["first_transaction_signature"] = first_signature
+            test_result["first_solscan_url"] = f"https://solscan.io/tx/{first_signature}?cluster=devnet"
+            
+            # 3. Проверка статуса после первого платежа
+            await asyncio.sleep(5)
+            status_after_first = await get_payment_status(payment_id)
+            test_result["status_checks"].append({
+                "check": "after_first_partial",
+                "status": status_after_first["status"],
+                "paid_amount": status_after_first.get("paid_amount", 0),
+                "remaining_amount": status_after_first.get("remaining_amount"),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            if status_after_first["status"] != "partial":
+                test_result["error"] = f"Expected 'partial' status after first payment, got '{status_after_first['status']}'"
+                logger.error(f"❌ Unexpected status after first payment: {status_after_first['status']}")
+                return test_result
+            
+            logger.info(f"✅ First partial payment confirmed: {status_after_first.get('paid_amount')} SOL paid")
+            
+            # 4. Второй частичный платеж
+            logger.info(f"📤 Sending second partial payment: {second_partial} SOL...")
+            second_signature = await self.send_sol_transaction(payment["payment_address"], second_partial)
+            test_result["second_transaction_signature"] = second_signature
+            test_result["second_solscan_url"] = f"https://solscan.io/tx/{second_signature}?cluster=devnet"
+            
+            # 5. Проверка статуса после второго платежа
+            await asyncio.sleep(5)
+            status_after_second = await get_payment_status(payment_id)
+            test_result["status_checks"].append({
+                "check": "after_second_partial",
+                "status": status_after_second["status"],
+                "paid_amount": status_after_second.get("paid_amount", 0),
+                "remaining_amount": status_after_second.get("remaining_amount"),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            logger.info(f"✅ Second partial payment confirmed: {status_after_second.get('paid_amount')} SOL paid")
+            
+            # 6. Третий частичный платеж
+            logger.info(f"📤 Sending third partial payment: {third_partial} SOL...")
+            third_signature = await self.send_sol_transaction(payment["payment_address"], third_partial)
+            test_result["third_transaction_signature"] = third_signature
+            test_result["third_solscan_url"] = f"https://solscan.io/tx/{third_signature}?cluster=devnet"
+            
+            # 7. Проверка финального статуса
+            for attempt in range(8):
+                await asyncio.sleep(5)
+                
+                final_status = await get_payment_status(payment_id)
+                test_result["status_checks"].append({
+                    "check": f"after_third_partial_attempt_{attempt + 1}",
+                    "status": final_status["status"],
+                    "paid_amount": final_status.get("paid_amount", 0),
+                    "remaining_amount": final_status.get("remaining_amount"),
+                    "outcome_amount": final_status.get("outcome_amount"),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                if final_status["status"] in ["paid", "overpaid"]:
+                    logger.info(f"✅ Payment completed! Status: {final_status['status']}, Total paid: {final_status.get('paid_amount')} SOL")
+                    test_result["payment_data"] = final_status
+                    test_result["success"] = True
+                    break
+                else:
+                    logger.info(f"⏳ Payment status: {final_status['status']}... (attempt {attempt + 1}/8)")
+                    logger.info(f"   Paid: {final_status.get('paid_amount', 0)} SOL, Remaining: {final_status.get('remaining_amount', 0)} SOL")
+            
+            if not test_result["success"]:
+                test_result["error"] = f"Payment not completed. Final status: {final_status['status']}"
+                logger.error("❌ Payment was not completed")
+                
+                # Освобождаем кошелек в случае неудачи
+                logger.info(f"🔓 Releasing wallet due to test failure...")
+                try:
+                    await cancel_payment(payment_id)
+                except Exception as e:
+                    logger.warning(f"Failed to release wallet: {e}")
+            
+        except Exception as e:
+            test_result["error"] = str(e)
+            logger.error(f"❌ Three-installment partial payment test failed: {e}")
+            
+            # Освобождаем кошелек в случае исключения
+            if test_result.get("payment_id"):
+                logger.info(f"🔓 Releasing wallet due to exception...")
+                try:
+                    await cancel_payment(test_result["payment_id"])
+                except Exception as release_error:
+                    logger.warning(f"Failed to release wallet: {release_error}")
+        
+        test_result["end_time"] = datetime.now().isoformat()
+        return test_result
+    
+    async def test_partial_payment_with_remaining_balance(self, test_name: str, expected_amount: float, partial_amount: float) -> Dict[str, Any]:
+        """
+        Тест частичного платежа с проверкой остатка
+        
+        Args:
+            test_name: Название теста
+            expected_amount: Ожидаемая сумма платежа
+            partial_amount: Сумма частичного платежа
+            
+        Returns:
+            Результат теста
+        """
+        test_result = {
+            "test_name": test_name,
+            "start_time": datetime.now().isoformat(),
+            "success": False,
+            "error": None,
+            "payment_id": None,
+            "payment_address": None,
+            "transaction_signature": None,
+            "solscan_url": None,
+            "payment_data": None,
+            "status_checks": [],
+            "expected_amount": expected_amount,
+            "partial_amount": partial_amount,
+            "remaining_amount": round(expected_amount - partial_amount, 8)
+        }
+        
+        try:
+            logger.info(f"\n🧪 Starting partial payment with remaining balance test: {test_name}")
+            logger.info(f"Expected: {expected_amount} SOL, Partial: {partial_amount} SOL, Remaining: {test_result['remaining_amount']} SOL")
+            
+            # 0. Проверка и пополнение баланса отправителя
+            await self.check_and_fund_sender(required_amount=0.2)
+            
+            # 1. Создание платежа с ожидаемой суммой
+            payment_id = str(uuid.uuid4())
+            logger.info(f"📝 Creating payment: {payment_id}")
+            
+            payment = await create_payment(payment_id, "sol", expected_amount=expected_amount)
+            test_result["payment_id"] = payment_id
+            test_result["payment_address"] = payment["payment_address"]
+            
+            logger.info(f"✅ Payment created: {payment['payment_address']}")
+            
+            # 2. Отправка частичного платежа
+            logger.info(f"📤 Sending partial payment: {partial_amount} SOL...")
+            signature = await self.send_sol_transaction(payment["payment_address"], partial_amount)
+            test_result["transaction_signature"] = signature
+            test_result["solscan_url"] = f"https://solscan.io/tx/{signature}?cluster=devnet"
+            
+            # 3. Проверка статуса после частичного платежа
+            for attempt in range(5):
+                await asyncio.sleep(3)
+                
+                status = await get_payment_status(payment_id)
+                test_result["status_checks"].append({
+                    "check": f"after_partial_payment_attempt_{attempt + 1}",
+                    "status": status["status"],
+                    "expected_amount": status.get("expected_amount"),
+                    "paid_amount": status.get("paid_amount", 0),
+                    "remaining_amount": status.get("remaining_amount"),
+                    "outcome_amount": status.get("outcome_amount"),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                if status["status"] == "partial":
+                    # Проверяем корректность расчетов
+                    paid_amount = status.get("paid_amount", 0)
+                    remaining_amount = status.get("remaining_amount", 0)
+                    expected_remaining = round(expected_amount - paid_amount, 8)
+                    
+                    if abs(remaining_amount - expected_remaining) < 0.00000001:  # Учитываем погрешность с округлением
+                        logger.info(f"✅ Partial payment detected with correct calculations!")
+                        logger.info(f"   Paid: {paid_amount} SOL, Remaining: {remaining_amount} SOL")
+                        test_result["payment_data"] = status
+                        test_result["success"] = True
+                        
+                        # Освобождаем кошелек для частичного платежа в тестах
+                        logger.info(f"🔓 Releasing wallet for partial payment test...")
+                        await cancel_payment(payment_id)
+                        break
+                    else:
+                        logger.warning(f"⚠️ Calculation mismatch: expected remaining {expected_remaining}, got {remaining_amount}")
+                        test_result["error"] = f"Calculation mismatch: expected remaining {expected_remaining}, got {remaining_amount}"
+                        break
+                else:
+                    logger.info(f"⏳ Payment status: {status['status']}... (attempt {attempt + 1}/5)")
+            
+            if not test_result["success"] and not test_result.get("error"):
+                test_result["error"] = f"Partial payment not detected. Status: {status['status']}"
+                logger.error("❌ Partial payment was not detected")
+            
+        except Exception as e:
+            test_result["error"] = str(e)
+            logger.error(f"❌ Partial payment with remaining balance test failed: {e}")
+            
+            # Освобождаем кошелек в случае исключения
+            if test_result.get("payment_id"):
+                logger.info(f"🔓 Releasing wallet due to exception...")
+                try:
+                    await cancel_payment(test_result["payment_id"])
+                except Exception as release_error:
+                    logger.warning(f"Failed to release wallet: {release_error}")
+        
+        test_result["end_time"] = datetime.now().isoformat()
+        return test_result
+    
+    async def test_overpayment(self, test_name: str, expected_amount: float, overpayment_amount: float) -> Dict[str, Any]:
+        """
+        Тест переплаты
+        
+        Args:
+            test_name: Название теста
+            expected_amount: Ожидаемая сумма платежа
+            overpayment_amount: Сумма переплаты
+            
+        Returns:
+            Результат теста
+        """
+        test_result = {
+            "test_name": test_name,
+            "start_time": datetime.now().isoformat(),
+            "success": False,
+            "error": None,
+            "payment_id": None,
+            "payment_address": None,
+            "transaction_signature": None,
+            "solscan_url": None,
+            "payment_data": None,
+            "status_checks": [],
+            "expected_amount": expected_amount,
+            "overpayment_amount": overpayment_amount
+        }
+        
+        try:
+            logger.info(f"\n🧪 Starting overpayment test: {test_name}")
+            logger.info(f"Expected: {expected_amount} SOL, Overpayment: {overpayment_amount} SOL")
+            
+            # 1. Создание платежа с ожидаемой суммой
+            payment_id = str(uuid.uuid4())
+            logger.info(f"📝 Creating payment: {payment_id}")
+            
+            payment = await create_payment(payment_id, "sol", expected_amount=expected_amount)
+            test_result["payment_id"] = payment_id
+            test_result["payment_address"] = payment["payment_address"]
+            
+            logger.info(f"✅ Payment created: {payment['payment_address']}")
+            
+            # 2. Отправка переплаты
+            logger.info(f"📤 Sending overpayment: {overpayment_amount} SOL...")
+            signature = await self.send_sol_transaction(payment["payment_address"], overpayment_amount)
+            test_result["transaction_signature"] = signature
+            test_result["solscan_url"] = f"https://solscan.io/tx/{signature}?cluster=devnet"
+            
+            # 3. Проверка статуса после переплаты
+            for attempt in range(5):
+                await asyncio.sleep(3)
+                
+                status = await get_payment_status(payment_id)
+                test_result["status_checks"].append({
+                    "check": f"after_overpayment_attempt_{attempt + 1}",
+                    "status": status["status"],
+                    "expected_amount": status.get("expected_amount"),
+                    "paid_amount": status.get("paid_amount", 0),
+                    "remaining_amount": status.get("remaining_amount"),
+                    "outcome_amount": status.get("outcome_amount"),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                if status["status"] == "overpaid":
+                    overpaid_amount = status.get("paid_amount", 0) - status.get("expected_amount", 0)
+                    logger.info(f"✅ Overpayment detected! Paid: {status.get('paid_amount')} SOL, Overpaid: {overpaid_amount} SOL")
+                    test_result["payment_data"] = status
+                    test_result["success"] = True
+                    break
+                elif status["status"] == "paid":
+                    logger.info(f"✅ Payment completed (exact amount): {status.get('paid_amount')} SOL")
+                    test_result["payment_data"] = status
+                    test_result["success"] = True
+                    break
+                else:
+                    logger.info(f"⏳ Payment status: {status['status']}... (attempt {attempt + 1}/5)")
+            
+            if not test_result["success"]:
+                test_result["error"] = f"Overpayment not detected. Status: {status['status']}"
+                logger.error("❌ Overpayment was not detected")
+                
+                # Освобождаем кошелек в случае неудачи
+                logger.info(f"🔓 Releasing wallet due to test failure...")
+                try:
+                    await cancel_payment(payment_id)
+                except Exception as e:
+                    logger.warning(f"Failed to release wallet: {e}")
+            
+        except Exception as e:
+            test_result["error"] = str(e)
+            logger.error(f"❌ Overpayment test failed: {e}")
+            
+            # Освобождаем кошелек в случае исключения
+            if test_result.get("payment_id"):
+                logger.info(f"🔓 Releasing wallet due to exception...")
+                try:
+                    await cancel_payment(test_result["payment_id"])
+                except Exception as release_error:
+                    logger.warning(f"Failed to release wallet: {release_error}")
+        
+        test_result["end_time"] = datetime.now().isoformat()
+        return test_result
+    
+    async def test_partial_payment_cancellation(self, test_name: str, expected_amount: float, partial_amount: float) -> Dict[str, Any]:
+        """
+        Тест отмены частично оплаченного платежа
+        
+        Args:
+            test_name: Название теста
+            expected_amount: Ожидаемая сумма платежа
+            partial_amount: Сумма частичного платежа
+            
+        Returns:
+            Результат теста
+        """
+        test_result = {
+            "test_name": test_name,
+            "start_time": datetime.now().isoformat(),
+            "success": False,
+            "error": None,
+            "payment_id": None,
+            "payment_address": None,
+            "transaction_signature": None,
+            "solscan_url": None,
+            "cancellation_result": None,
+            "status_checks": [],
+            "expected_amount": expected_amount,
+            "partial_amount": partial_amount
+        }
+        
+        try:
+            logger.info(f"\n🧪 Starting partial payment cancellation test: {test_name}")
+            
+            # 0. Проверка и пополнение баланса отправителя
+            await self.check_and_fund_sender(required_amount=0.2)
+            
+            # 1. Создание платежа с ожидаемой суммой
+            payment_id = str(uuid.uuid4())
+            logger.info(f"📝 Creating payment: {payment_id}")
+            
+            payment = await create_payment(payment_id, "sol", expected_amount=expected_amount)
+            test_result["payment_id"] = payment_id
+            test_result["payment_address"] = payment["payment_address"]
+            
+            logger.info(f"✅ Payment created: {payment['payment_address']}")
+            
+            # 2. Отправка частичного платежа
+            logger.info(f"📤 Sending partial payment: {partial_amount} SOL...")
+            signature = await self.send_sol_transaction(payment["payment_address"], partial_amount)
+            test_result["transaction_signature"] = signature
+            test_result["solscan_url"] = f"https://solscan.io/tx/{signature}?cluster=devnet"
+            
+            # 3. Проверка статуса после частичного платежа
+            await asyncio.sleep(5)
+            status_after_payment = await get_payment_status(payment_id)
+            test_result["status_checks"].append({
+                "check": "after_partial_payment",
+                "status": status_after_payment["status"],
+                "paid_amount": status_after_payment.get("paid_amount", 0),
+                "remaining_amount": status_after_payment.get("remaining_amount"),
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            if status_after_payment["status"] != "partial":
+                test_result["error"] = f"Expected 'partial' status, got '{status_after_payment['status']}'"
+                logger.error(f"❌ Unexpected status: {status_after_payment['status']}")
+                return test_result
+            
+            logger.info(f"✅ Partial payment confirmed: {status_after_payment.get('paid_amount')} SOL paid")
+            
+            # 4. Отмена платежа
+            logger.info(f"🚫 Cancelling partial payment...")
+            cancelled = await cancel_payment(payment_id)
+            test_result["cancellation_result"] = cancelled
+            
+            if cancelled["status"] == "cancelled":
+                test_result["success"] = True
+                logger.info("✅ Partial payment cancelled successfully")
+            else:
+                test_result["error"] = f"Cancellation failed. Status: {cancelled['status']}"
+                logger.error(f"❌ Cancellation failed: {cancelled['status']}")
+            
+        except Exception as e:
+            test_result["error"] = str(e)
+            logger.error(f"❌ Partial payment cancellation test failed: {e}")
+            
+            # Освобождаем кошелек в случае исключения
+            if test_result.get("payment_id"):
+                logger.info(f"🔓 Releasing wallet due to exception...")
+                try:
+                    await cancel_payment(test_result["payment_id"])
+                except Exception as release_error:
+                    logger.warning(f"Failed to release wallet: {release_error}")
         
         test_result["end_time"] = datetime.now().isoformat()
         return test_result
@@ -336,6 +1141,14 @@ class DevnetTester:
                     payment_data = result["payment_data"]
                     report.append(f"- **Получено:** {payment_data.get('payment_amount', 'N/A')} SOL")
                     report.append(f"- **Эквивалент:** ${payment_data.get('outcome_amount', 'N/A')}")
+                    
+                    # Дополнительная информация для частичных платежей
+                    if result.get("expected_amount"):
+                        report.append(f"- **Ожидаемая сумма:** {result['expected_amount']} SOL")
+                    if payment_data.get("paid_amount") is not None:
+                        report.append(f"- **Оплачено:** {payment_data.get('paid_amount')} SOL")
+                    if payment_data.get("remaining_amount") is not None:
+                        report.append(f"- **Осталось:** {payment_data.get('remaining_amount')} SOL")
             else:
                 report.append("**Статус:** Неудачно")
                 if result.get("error"):
@@ -347,9 +1160,16 @@ class DevnetTester:
             if result.get("payment_address"):
                 report.append(f"- **Адрес:** `{result['payment_address']}`")
             
+            # Обработка транзакций (может быть несколько для частичных платежей)
             if result.get("transaction_signature"):
                 report.append(f"- **Транзакция:** [{result['transaction_signature']}]({result['solscan_url']})")
                 report.append(f"- **Solscan:** [Просмотр транзакции]({result['solscan_url']})")
+            
+            # Обработка множественных транзакций для завершенных частичных платежей
+            if result.get("first_transaction_signature"):
+                report.append(f"- **Первая транзакция:** [{result['first_transaction_signature']}]({result['first_solscan_url']})")
+            if result.get("second_transaction_signature"):
+                report.append(f"- **Вторая транзакция:** [{result['second_transaction_signature']}]({result['second_solscan_url']})")
             
             if result.get("status_checks"):
                 report.append("- **Проверки статуса:**")
@@ -363,11 +1183,30 @@ class DevnetTester:
         report.append("## 🔗 Ссылки на транзакции в Solscan")
         report.append("")
         
-        transactions = [r for r in results if r.get("transaction_signature")]
-        if transactions:
-            for i, result in enumerate(transactions, 1):
-                report.append(f"{i}. [{result['test_name']}]({result['solscan_url']})")
-        else:
+        transaction_count = 0
+        for result in results:
+            if result.get("transaction_signature"):
+                transaction_count += 1
+                report.append(f"{transaction_count}. **{result['test_name']}**")
+                report.append(f"   - [{result['transaction_signature']}]({result['solscan_url']})")
+            
+            # Обработка множественных транзакций
+            if result.get("first_transaction_signature"):
+                transaction_count += 1
+                report.append(f"{transaction_count}. **{result['test_name']} (Первая транзакция)**")
+                report.append(f"   - [{result['first_transaction_signature']}]({result['first_solscan_url']})")
+            
+            if result.get("second_transaction_signature"):
+                transaction_count += 1
+                report.append(f"{transaction_count}. **{result['test_name']} (Вторая транзакция)**")
+                report.append(f"   - [{result['second_transaction_signature']}]({result['second_solscan_url']})")
+            
+            if result.get("third_transaction_signature"):
+                transaction_count += 1
+                report.append(f"{transaction_count}. **{result['test_name']} (Третья транзакция)**")
+                report.append(f"   - [{result['third_transaction_signature']}]({result['third_solscan_url']})")
+        
+        if transaction_count == 0:
             report.append("Нет транзакций для отображения.")
         
         report.append("")
@@ -398,6 +1237,11 @@ class DevnetTester:
             await initialize(self.config)
             logger.info("✅ Initialization complete")
             
+            # Очистка заблокированных кошельков
+            logger.info("🧹 Cleaning up locked wallets...")
+            await self.cleanup_locked_wallets()
+            logger.info("✅ Locked wallets cleaned up")
+            
             # Настройка тестового кошелька
             logger.info("🔑 Setting up test wallet...")
             await self.setup_test_wallet()
@@ -415,6 +1259,11 @@ class DevnetTester:
             logger.info("\n🧪 Running payment tests...")
             payment_results = await self.test_multiple_payments()
             results.extend(payment_results)
+            
+            # Тесты частичных платежей
+            logger.info("\n🧪 Running partial payment tests...")
+            partial_payment_results = await self.test_partial_payments()
+            results.extend(partial_payment_results)
             
             # Генерация отчета
             logger.info("\n📊 Generating test report...")
@@ -455,6 +1304,13 @@ class DevnetTester:
             raise
         finally:
             logger.info("\n🧹 Cleaning up...")
+            
+            # Очистка заблокированных кошельков
+            try:
+                await self.cleanup_locked_wallets()
+            except Exception as e:
+                logger.warning(f"Failed to cleanup wallets: {e}")
+            
             await cleanup()
             logger.info("✅ Cleanup complete")
 

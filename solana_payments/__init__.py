@@ -29,6 +29,7 @@ from .solana_payments import (
     get_payment_status,
     cancel_payment,
     check_payment_received,
+    get_payment_summary,
     release_all_wallets,
     cleanup
 )
@@ -42,6 +43,7 @@ __all__ = [
     "get_payment_status",
     "cancel_payment",
     "check_payment_received",
+    "get_payment_summary",
     "release_all_wallets",
     "cleanup"
 ]
