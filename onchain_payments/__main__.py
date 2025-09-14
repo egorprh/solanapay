@@ -1,4 +1,5 @@
 import asyncio
+from typing import Optional
 from nats import connect, NATS
 from src.onchain_payments.handlers import (
     handle_payment_info_request,
@@ -10,11 +11,36 @@ from src.core.config import settings
 
 
 async def main() -> None:
+    """
+    Главная функция приложения OnChain Payments Service.
+    
+    Инициализирует NATS соединение, подписывается на сообщения для обработки
+    платежей и запускает бесконечный цикл ожидания сообщений. Обрабатывает
+    три типа запросов: создание, получение информации и отмена платежей.
+    
+    Returns:
+        None: Функция работает бесконечно до принудительной остановки
+        
+    Raises:
+        Exception: При ошибке подключения к NATS или обработки сообщений
+        
+    Example:
+        Запуск сервиса:
+        >>> asyncio.run(main())
+        
+    Note:
+        Сервис подписывается на следующие NATS subjects:
+        - onchain_payments.payment.create
+        - onchain_payments.payment.get  
+        - onchain_payments.payment.cancel
+        
+        При завершении работы корректно закрывает все соединения.
+    """
     nats_adapter = NatsAdapter(
         connect,
         f"nats://{settings.nats.host}:{settings.nats.port}"
     )
-    session: NATS | None = None
+    session: Optional[NATS] = None
     try:
         session = await nats_adapter.open_nats_session()
         # stream = session.jetstream()

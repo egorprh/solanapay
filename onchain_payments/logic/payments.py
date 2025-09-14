@@ -1,5 +1,5 @@
 import aiohttp
-from typing import Any
+from typing import Any, Dict, Optional, List
 from enum import Enum
 from dataclasses import dataclass
 from web3 import Web3
@@ -25,7 +25,26 @@ class Token(Enum):
     SOL = "sol"
 
 
-def erc20_abi_default():
+def erc20_abi_default() -> List[Dict[str, Any]]:
+    """
+    Получение стандартного ABI для ERC20 токенов.
+    
+    Возвращает минимальный набор функций ABI, необходимых для работы
+    с ERC20 токенами: balanceOf, decimals и transfer.
+    
+    Returns:
+        List[Dict[str, Any]]: Список ABI функций для ERC20 контрактов
+        
+    Example:
+        >>> abi = erc20_abi_default()
+        >>> print(len(abi))
+        3
+        
+    Note:
+        ABI содержит только основные функции для проверки баланса и
+        получения информации о токене. Для полной функциональности
+        может потребоваться расширенный ABI.
+    """
     return [
         {
             "constant": True,
@@ -56,7 +75,27 @@ def erc20_abi_default():
     ]
 
 
-def token_addresses_default():
+def token_addresses_default() -> Dict[Network, Dict[Token, str]]:
+    """
+    Получение адресов токенов для различных блокчейн-сетей.
+    
+    Возвращает словарь с маппингом токенов на их контрактные адреса
+    в различных сетях. Поддерживает USDT и USDC в Polygon, Arbitrum,
+    Optimism и Solana.
+    
+    Returns:
+        Dict[Network, Dict[Token, str]]: Словарь адресов токенов по сетям
+        
+    Example:
+        >>> addresses = token_addresses_default()
+        >>> polygon_usdt = addresses[Network.POLYGON][Token.USDT]
+        >>> print(f"Polygon USDT: {polygon_usdt}")
+        
+    Note:
+        Адреса токенов должны быть заполнены актуальными контрактными
+        адресами для каждой сети. Пустые строки означают, что адрес
+        не настроен.
+    """
     return {
         Network.POLYGON: {
             Token.USDT: "",
@@ -79,17 +118,65 @@ def token_addresses_default():
 
 @dataclass
 class Data:
+    """
+    Класс-контейнер для статических данных блокчейн-сетей.
+    
+    Предоставляет статические методы для получения ABI и адресов токенов.
+    Используется как единая точка доступа к конфигурационным данным
+    для работы с различными блокчейн-сетями.
+    """
+    
     @staticmethod
-    def erc20_abi():
+    def erc20_abi() -> List[Dict[str, Any]]:
+        """
+        Получение ERC20 ABI через статический метод.
+        
+        Returns:
+            List[Dict[str, Any]]: ABI для ERC20 токенов
+            
+        Note:
+            Обертка над функцией erc20_abi_default() для удобства использования.
+        """
         return erc20_abi_default()
 
     @staticmethod
-    def token_addresses():
+    def token_addresses() -> Dict[Network, Dict[Token, str]]:
+        """
+        Получение адресов токенов через статический метод.
+        
+        Returns:
+            Dict[Network, Dict[Token, str]]: Адреса токенов по сетям
+            
+        Note:
+            Обертка над функцией token_addresses_default() для удобства использования.
+        """
         return token_addresses_default()
 
 
 class Payments:
-    def __init__(self):
+    """
+    Основной класс для обработки криптовалютных платежей.
+    
+    Обеспечивает создание, обработку и отмену платежей в различных
+    блокчейн-сетях. Поддерживает EVM-совместимые сети (Ethereum, Polygon,
+    Arbitrum, Optimism) и Solana. Автоматически отслеживает поступления
+    средств и обновляет статус платежей.
+    """
+    
+    def __init__(self) -> None:
+        """
+        Инициализация класса Payments.
+        
+        Создает подключения к блокчейн-сетям через Web3 провайдеры,
+        инициализирует WalletManager для управления кошельками.
+        
+        Raises:
+            Exception: При ошибке подключения к блокчейн-нодам
+            
+        Note:
+            Использует настройки из src.core.config.settings для получения
+            URL блокчейн-нод. Поддерживает HTTP провайдеры для всех сетей.
+        """
         logger.info("Initializing Payments class and connecting to networks")
         self.networks = {
             Network.POLYGON: Web3(Web3.HTTPProvider(settings.onchainpayments.POLYGON_NODE_URL)),
@@ -103,7 +190,36 @@ class Payments:
         payment_id: str,
         payment_network: str,
         payment_token: str,
-    ) -> dict[str, Any]:
+    ) -> Dict[str, Any]:
+        """
+        Создание нового платежа.
+        
+        Создает новый платеж с указанными параметрами, выделяет свободный
+        кошелек из пула, фиксирует начальный баланс и сохраняет платеж
+        в базе данных со статусом 'pending'.
+        
+        Args:
+            payment_id (str): Уникальный идентификатор платежа (обычно UUID)
+            payment_network (str): Сеть блокчейна (ethereum, polygon, arbitrum, optimism, solana)
+            payment_token (str): Тип токена (eth, usdt, usdc, sol)
+            
+        Returns:
+            Dict[str, Any]: Данные созданного платежа включая адрес кошелька
+            
+        Raises:
+            Exception: При отсутствии доступных кошельков или ошибке сохранения
+            
+        Example:
+            >>> payments = Payments()
+            >>> payment_data = await payments.create_payment(
+            ...     "uuid-123", "ethereum", "eth"
+            ... )
+            >>> print(f"Payment address: {payment_data['payment_address']}")
+            
+        Note:
+            Метод автоматически выделяет кошелек и блокирует его в Redis.
+            Начальный баланс фиксируется для последующего отслеживания изменений.
+        """
         logger.info(f"Creating payment with ID: {payment_id}, network: {payment_network}, token: {payment_token}")
         network_str = payment_network.lower()
         token_str = payment_token.lower()
@@ -129,7 +245,23 @@ class Payments:
         logger.info(f"Payment created and stored in the database: {payment.model_dump(mode="json")}")
         return payment.model_dump(mode="json")
 
-    async def process_payment(self, payment_id: str) -> dict[str, Any]:
+    async def process_payment(self, payment_id: str) -> Dict[str, Any]:
+        """
+        Обработка платежа - проверка поступления средств.
+        
+        Проверяет текущий баланс кошелька, вычисляет изменение относительно
+        начального баланса. При обнаружении поступления обновляет статус
+        на 'paid', вычисляет эквивалент в USD и освобождает кошелек.
+        
+        Args:
+            payment_id (str): Идентификатор платежа для обработки
+            
+        Returns:
+            Dict[str, Any]: Обновленные данные платежа
+            
+        Raises:
+            Exception: При отсутствии платежа или ошибке обработки
+        """
         logger.info(f"Processing payment with ID: {payment_id}")
         payment_data = await db.payments.find_one({"payment_id": payment_id})
         if not payment_data:
@@ -351,7 +483,22 @@ class Payments:
         logger.info(f"Current SPL token balance: {current_balance}")
         return current_balance - old_balance
 
-    async def cancel_payment(self, payment_id: str) -> dict[str, Any]:
+    async def cancel_payment(self, payment_id: str) -> Dict[str, Any]:
+        """
+        Отмена платежа.
+        
+        Отменяет существующий платеж, обновляет статус на 'cancelled'
+        и освобождает кошелек для повторного использования.
+        
+        Args:
+            payment_id (str): Идентификатор платежа для отмены
+            
+        Returns:
+            Dict[str, Any]: Обновленные данные платежа
+            
+        Raises:
+            Exception: При отсутствии платежа или ошибке отмены
+        """
         logger.info(f"Cancelling payment with ID: {payment_id}")
         payment_data = await db.payments.find_one({"payment_id": payment_id})
         if not payment_data:
@@ -374,6 +521,12 @@ class Payments:
         )
         return payment.model_dump(mode="json")
 
-    async def _close_redis(self):
+    async def _close_redis(self) -> None:
+        """
+        Закрытие соединения с Redis.
+        
+        Корректно закрывает соединение с Redis через WalletManager.
+        Вызывается при завершении работы с экземпляром Payments.
+        """
         logger.info("Closing redis connection")
         await self.wallet_manager.close()
