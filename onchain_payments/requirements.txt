@@ -1,0 +1,33 @@
+# OnChain Payments Service Dependencies
+# Core blockchain and Web3 libraries
+web3>=6.0.0,<7.0.0
+
+# Message queue and async communication
+nats-py>=2.0.0
+
+# Database drivers (async)
+motor>=3.0.0
+redis>=4.5.0
+
+# Data validation and serialization
+pydantic>=2.0.0
+ormsgpack>=0.6.0
+
+# HTTP client for external APIs
+aiohttp>=3.8.0
+
+# Standard library dependencies (no version needed)
+# asyncio - built-in
+# typing - built-in
+# enum - built-in
+# dataclasses - built-in (Python 3.7+)
+# datetime - built-in
+# uuid - built-in
+# logging - built-in
+
+# Development dependencies (optional)
+# poetry>=1.4.0  # If using Poetry for dependency management
+# pytest>=7.0.0  # For testing
+# pytest-asyncio>=0.21.0  # For async testing
+# black>=22.0.0  # Code formatting
+# flake8>=5.0.0  # Linting

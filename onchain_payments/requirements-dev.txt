@@ -1,0 +1,108 @@
+# OnChain Payments Service - Development Requirements
+# 
+# This file contains additional dependencies for development, testing, and code quality
+# 
+# Installation: pip install -r requirements-detailed.txt -r requirements-dev.txt
+# Or: pip install -r requirements-detailed.txt && pip install -r requirements-dev.txt
+
+# =============================================================================
+# TESTING FRAMEWORK
+# =============================================================================
+
+# pytest - Testing framework
+pytest==7.4.3
+
+# pytest-asyncio - Async testing support
+pytest-asyncio==0.21.1
+
+# pytest-cov - Coverage reporting
+pytest-cov==4.1.0
+
+# pytest-mock - Mocking utilities
+pytest-mock==3.12.0
+
+# =============================================================================
+# CODE QUALITY AND FORMATTING
+# =============================================================================
+
+# black - Code formatter
+black==23.11.0
+
+# isort - Import sorting
+isort==5.12.0
+
+# flake8 - Linting
+flake8==6.1.0
+
+# mypy - Type checking
+mypy==1.7.1
+
+# =============================================================================
+# DEVELOPMENT TOOLS
+# =============================================================================
+
+# pre-commit - Git hooks for code quality
+pre-commit==3.6.0
+
+# ipython - Enhanced Python shell
+ipython==8.17.2
+
+# jupyter - Notebook support (optional)
+jupyter==1.0.0
+
+# =============================================================================
+# MONITORING AND DEBUGGING
+# =============================================================================
+
+# memory-profiler - Memory usage profiling
+memory-profiler==0.61.0
+
+# line-profiler - Line-by-line profiling
+line-profiler==4.1.1
+
+# =============================================================================
+# DOCUMENTATION
+# =============================================================================
+
+# sphinx - Documentation generator
+sphinx==7.2.6
+
+# sphinx-rtd-theme - Read the Docs theme
+sphinx-rtd-theme==1.3.0
+
+# =============================================================================
+# SECURITY
+# =============================================================================
+
+# safety - Security vulnerability scanner
+safety==2.3.5
+
+# bandit - Security linter
+bandit==1.7.5
+
+# =============================================================================
+# DEPENDENCY MANAGEMENT
+# =============================================================================
+
+# pip-tools - Dependency management tools
+pip-tools==7.3.0
+
+# pipreqs - Generate requirements from imports
+pipreqs==0.4.13
+
+# =============================================================================
+# NOTES
+# =============================================================================
+# 
+# 1. These are development-only dependencies
+# 2. Not needed for production deployment
+# 3. Can be installed in a separate virtual environment
+# 4. Some tools may require additional system dependencies
+# 
+# Usage examples:
+# - Run tests: pytest
+# - Format code: black .
+# - Check types: mypy .
+# - Lint code: flake8 .
+# - Security scan: safety check
+# - Generate docs: sphinx-build -b html docs docs/_build/html

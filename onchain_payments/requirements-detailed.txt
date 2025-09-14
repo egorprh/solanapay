@@ -1,0 +1,98 @@
+# OnChain Payments Service - Detailed Requirements
+# Generated based on code analysis of onchain_payments module
+# 
+# Installation: pip install -r requirements-detailed.txt
+# 
+# Last updated: September 2024
+
+# =============================================================================
+# CORE BLOCKCHAIN LIBRARIES
+# =============================================================================
+
+# Web3.py - Ethereum and EVM-compatible blockchain interaction
+# Used in: logic/payments.py for blockchain operations
+web3==6.15.1
+
+# =============================================================================
+# MESSAGE QUEUE AND ASYNC COMMUNICATION
+# =============================================================================
+
+# NATS Python client - High-performance messaging system
+# Used in: __main__.py, handlers.py for message handling
+nats-py==2.6.0
+
+# =============================================================================
+# DATABASE DRIVERS (ASYNC)
+# =============================================================================
+
+# Motor - Async MongoDB driver
+# Used in: logic/database.py for MongoDB operations
+motor==3.3.2
+
+# Redis async client - For wallet management and state coordination
+# Used in: logic/wallet_manager.py for Redis operations
+redis==5.0.1
+
+# =============================================================================
+# DATA VALIDATION AND SERIALIZATION
+# =============================================================================
+
+# Pydantic v2 - Data validation and settings management
+# Used in: models/payment.py for data models
+pydantic==2.5.0
+
+# ormsgpack - Fast MessagePack serialization
+# Used in: handlers.py for message serialization
+ormsgpack==0.6.0
+
+# =============================================================================
+# HTTP CLIENT FOR EXTERNAL APIs
+# =============================================================================
+
+# aiohttp - Async HTTP client/server
+# Used in: logic/payments.py, logic/utils.py for external API calls
+aiohttp==3.9.1
+
+# =============================================================================
+# STANDARD LIBRARY DEPENDENCIES
+# =============================================================================
+# These are built-in Python modules, no installation required:
+# - asyncio (async/await support)
+# - typing (type hints)
+# - enum (enumerations)
+# - dataclasses (data classes)
+# - datetime (date/time handling)
+# - uuid (UUID generation)
+# - logging (logging system)
+
+# =============================================================================
+# DEVELOPMENT DEPENDENCIES (OPTIONAL)
+# =============================================================================
+# Uncomment these for development environment:
+
+# pytest==7.4.3              # Testing framework
+# pytest-asyncio==0.21.1     # Async testing support
+# black==23.11.0              # Code formatting
+# flake8==6.1.0               # Code linting
+# mypy==1.7.1                 # Type checking
+# pre-commit==3.6.0           # Git hooks
+
+# =============================================================================
+# NOTES
+# =============================================================================
+# 
+# 1. Version ranges are used for core dependencies to allow patch updates
+# 2. Exact versions are specified for critical dependencies to ensure stability
+# 3. Standard library modules don't need to be installed
+# 4. Development dependencies are optional and commented out
+# 5. This file is compatible with Python 3.8+ (project uses Python 3.12.3)
+# 
+# For production deployment, consider using:
+# - Docker with multi-stage builds
+# - Poetry for dependency management
+# - pip-tools for dependency pinning
+# 
+# Security considerations:
+# - Regularly update dependencies for security patches
+# - Use dependency scanning tools
+# - Pin exact versions in production
