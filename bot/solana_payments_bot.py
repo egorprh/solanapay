@@ -24,15 +24,19 @@ import sys
 from dotenv import load_dotenv
 import uuid
 from typing import Optional
+import io
+import csv
+import json
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Обеспечиваем доступность корня проекта в PYTHONPATH при запуске из папки bot
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Интеграция с Solana Payments
@@ -45,6 +49,9 @@ from solana_payments.solana_payments import (
     cleanup as sp_cleanup,
     Config as SpConfig,
 )
+from solana_payments.tests.setup_database import setup_database as tests_setup_database
+import motor.motor_asyncio
+from bson import ObjectId
 
 
 # Реестр фоновых задач опроса платежей: payment_id -> asyncio.Task
@@ -77,19 +84,36 @@ def build_amount_menu() -> InlineKeyboardBuilder:
     return kb
 
 
-def solscan_tx_url(signature: str, cluster: str = "devnet") -> str:
-    """Ссылка на транзакцию в Solscan для devnet/mainnet."""
-    suffix = f"?cluster={cluster}" if cluster and cluster != "mainnet" else ""
-    return f"https://solscan.io/tx/{signature}{suffix}"
+ 
 
 
 async def ensure_solana_payments_initialized() -> None:
-    """Единоразовая инициализация solana_payments под devnet."""
+    """Единоразовая инициализация solana_payments под mainnet."""
     config = SpConfig()
-    # используем devnet для демонстрации
-    config.SOLANA_RPC_URL = "https://api.devnet.solana.com"
-    # остальная конфигурация (Mongo/Redis) берётся по умолчанию: localhost
+    # используем mainnet
+    config.SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+    # Подключения к сервисам внутри docker-compose
+    config.MONGODB_URL = "mongodb://mongodb:27017"
+    config.MONGODB_DATABASE = "solana_payments"
+    config.REDIS_URL = "redis://redis:6379"
     await sp_initialize(config)
+
+
+async def ensure_database_initialized() -> None:
+    """Идемпотентная инициализация БД: создаёт данные только если их нет."""
+    mongo_url = "mongodb://mongodb:27017"
+    mongo_db = "solana_payments"
+    client = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)
+    db = client[mongo_db]
+    try:
+        # Если документ с кошельками уже есть — ничего не делаем
+        exists = await db.wallets.find_one({"network": "solana"})
+        if exists:
+            return
+        # Иначе используем существующий скрипт инициализации (создаёт индексы и кошельки)
+        await tests_setup_database()
+    finally:
+        client.close()
 
 
 async def start_handler(message: Message, state) -> None:
@@ -205,8 +229,8 @@ async def donate_amount_callback(callback: CallbackQuery, state) -> None:
         "Отправьте перевод на адрес ниже. После подтверждения сетью вы получите уведомление.\n\n"
         f"Токен: {token.upper()}\n"
         f"Сумма: {expected_amount}\n"
-        f"Адрес для оплаты: `{address}`\n\n"
-        "ℹ️ Как только оплата будет подтверждена, я пришлю ссылку на транзакцию в Solscan."
+        f"Сеть: SOL\n"
+        f"Адрес для оплаты: `{address}`"
     )
 
     # Клавиатура с кнопкой отмены платежа
@@ -268,14 +292,12 @@ async def poll_payment_and_notify(chat_id: int, payment_id: str, check_interval_
                 await bot.send_message(chat_id, "🚫 Платёж отменён. При необходимости создайте новый.")
                 break
             if st in ("paid", "overpaid"):
-                signature = status.get("transaction_signature") or ""
-                url = solscan_tx_url(signature, cluster="devnet") if signature else "https://solscan.io/?cluster=devnet"
                 amount = status.get("paid_amount") or status.get("payment_amount")
                 token = status.get("token", "sol").upper()
                 text = (
                     "✅ Средства зачислены!\n\n"
+                    "🙏 Спасибо за донат!\n\n"
                     f"Получено: {amount} {token}\n"
-                    f"Ссылка на транзакцию: {url}"
                 )
                 await bot.send_message(chat_id, text)
                 break
@@ -297,8 +319,97 @@ async def poll_payment_and_notify(chat_id: int, payment_id: str, check_interval_
         await bot.session.close()
 
 
+def _serialize_value(value):
+    """Приведение значений Mongo к строкам для CSV."""
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, datetime):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    return value
+
+
+def _generate_csv_from_documents(documents: list[dict]) -> bytes:
+    """Формирует CSV из произвольных документов MongoDB. Возвращает bytes UTF-8."""
+    if not documents:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["empty"])  # чтобы файл не был пустым
+        return output.getvalue().encode("utf-8")
+
+    # Собираем все ключи
+    all_keys: set[str] = set()
+    for doc in documents:
+        all_keys.update(doc.keys())
+    # Приводим к детерминированному порядку колонок
+    fieldnames = sorted(all_keys)
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for doc in documents:
+        flat: dict[str, str] = {}
+        for key in fieldnames:
+            value = doc.get(key)
+            flat[key] = _serialize_value(value)
+        writer.writerow(flat)
+    return output.getvalue().encode("utf-8")
+
+
+def _generate_wallets_csv(wallet_docs: list[dict]) -> bytes:
+    """Формирует CSV для коллекции wallets: по одному ряду на адрес."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["network", "address", "index", "_id"])
+    for doc in wallet_docs:
+        network = doc.get("network")
+        addresses = doc.get("addresses") or []
+        mongo_id = str(doc.get("_id")) if doc.get("_id") is not None else ""
+        if isinstance(addresses, list):
+            for idx, addr in enumerate(addresses):
+                writer.writerow([_serialize_value(network), _serialize_value(addr), idx, mongo_id])
+        else:
+            writer.writerow([_serialize_value(network), _serialize_value(addresses), "", mongo_id])
+    return output.getvalue().encode("utf-8")
+
+
+async def get_data_handler(message: Message) -> None:
+    """Экспорт коллекций wallets и payments в виде двух CSV-файлов."""
+    try:
+        mongo_url = "mongodb://mongodb:27017"
+        mongo_db = "solana_payments"
+        client = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)
+        db = client[mongo_db]
+
+        wallets_cursor = db.wallets.find({})
+        payments_cursor = db.payments.find({})
+
+        wallets_docs = await wallets_cursor.to_list(length=None)
+        payments_docs = await payments_cursor.to_list(length=None)
+
+        wallets_csv = _generate_wallets_csv(wallets_docs)
+        payments_csv = _generate_csv_from_documents(payments_docs)
+
+        wallets_file = BufferedInputFile(wallets_csv, filename="wallets.csv")
+        payments_file = BufferedInputFile(payments_csv, filename="payments.csv")
+
+        await message.answer_document(document=wallets_file, caption="wallets.csv")
+        await message.answer_document(document=payments_file, caption="payments.csv")
+    except Exception:
+        await message.answer("❌ Не удалось сформировать CSV. Проверьте логи сервера.")
+
+
 async def on_startup() -> None:
     """Хук запуска: инициализация зависимостей Solana Payments."""
+    # Сначала идемпотентно убедимся, что БД подготовлена (индексы и пул кошельков)
+    await ensure_database_initialized()
     await ensure_solana_payments_initialized()
 
 
@@ -314,6 +425,7 @@ def build_dispatcher() -> Dispatcher:
     dp.message.register(start_handler, CommandStart())
     dp.message.register(donate_command_handler, Command("donate"))
     dp.message.register(cancel_all_handler, F.text == "/cancel_all_7890")
+    dp.message.register(get_data_handler, Command("get_data_7890"))
 
     dp.callback_query.register(donate_start_callback, F.data == "donate:start")
     dp.callback_query.register(donate_back_callback, F.data == "donate:back")

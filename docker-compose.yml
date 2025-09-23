@@ -1,0 +1,41 @@
+services:
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: solana_payments
+    volumes:
+      - mongodb_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  bot:
+    image: python:3.13-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    env_file:
+      - ./bot/.env
+    environment:
+      # Для библиотеки solana_payments (используется ботом)
+      MONGODB_URL: mongodb://mongodb:27017
+      REDIS_URL: redis://redis:6379
+      # RPC по умолчанию — devnet; можно переопределить через .env
+      SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+    depends_on:
+      - mongodb
+      - redis
+    command: sh -c "pip install -r solana_payments/requirements.txt && pip install -r bot/requirements.txt && python bot/solana_payments_bot.py"
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+

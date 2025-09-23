@@ -7,7 +7,7 @@
 ```
 solana_payments/
 ├── solana_payments.py              # Основная библиотека
-├── partial_payment.py # Модуль для очистки истекших платежей
+├── partial_payment.py              # Модуль для очистки истекших платежей
 ├── __init__.py                     # Экспорты библиотеки
 ├── requirements.txt                # Зависимости
 ├── docker-compose.yml              # Docker для MongoDB и Redis
@@ -40,18 +40,6 @@ solana_payments/
 
 ```bash
 pip install -r requirements.txt
-```
-
-### Для разработки
-
-```bash
-pip install -r requirements-dev.txt
-```
-
-### Точные версии (для воспроизводимых сборок)
-
-```bash
-pip install -r requirements-exact.txt
 ```
 
 ### Системные требования
@@ -237,24 +225,14 @@ payment = await create_payment("order-456", "sol", expected_amount=100.0)
     "token": "sol",
     "payment_address": "Solana-address",
     "status": "paid",  # "pending", "partial", "paid", "overpaid", "cancelled"
-    "payment_amount": 0.1,
     "outcome_amount": 20.0,
     "expected_amount": 100.0,  # Если указана
     "paid_amount": 100.0,      # Сумма всех частичных платежей
     "remaining_amount": 0.0,   # Остаток к доплате
     "partial_payments": [      # История частичных платежей
-        {
-            "amount": 30.0,
-            "timestamp": "2024-01-01T12:00:00",
-            "balance_after": 30.0
-        },
-        {
-            "amount": 70.0,
-            "timestamp": "2024-01-01T12:05:00",
-            "balance_after": 100.0
-        }
+        {"amount": 30.0, "timestamp": "2024-01-01T12:00:00", "balance_after": 30.0},
+        {"amount": 70.0, "timestamp": "2024-01-01T12:05:00", "balance_after": 100.0}
     ],
-    "transaction_signature": "tx-signature",
     "updated_at": "2024-01-01T00:00:00"
 }
 ```
@@ -263,12 +241,12 @@ payment = await create_payment("order-456", "sol", expected_amount=100.0)
 ```python
 status = await get_payment_status("payment-123")
 if status["status"] == "paid":
-    print(f"Received {status['payment_amount']} SOL")
+    print("Payment received!")
 elif status["status"] == "partial":
     print(f"Partial payment: {status['paid_amount']} SOL, remaining: {status['remaining_amount']} SOL")
 ```
 
-#### `get_payment_summary(payment_id)` (новая функция)
+#### `get_payment_summary(payment_id)`
 
 Возвращает детальную информацию о платеже.
 
@@ -280,13 +258,17 @@ elif status["status"] == "partial":
 {
     "payment_id": "uuid-string",
     "status": "partial",
+    "token": "sol",
+    "payment_address": "Solana-address",
     "expected_amount": 100.0,
     "paid_amount": 30.0,
     "remaining_amount": 70.0,
+    "outcome_amount": 7.5,
     "partial_payments_count": 1,
     "can_continue_payment": True,
     "is_fully_paid": False,
-    "is_overpaid": False
+    "created_at": "2024-01-01T00:00:00",
+    "updated_at": "2024-01-01T00:00:00"
 }
 ```
 
@@ -436,7 +418,7 @@ print(f"Статус после отмены: {cancelled['status']}")  # "cancel
 ```python
 import asyncio
 from solana_payments import SolanaPayments, Config
-from partial_payment import PartialPaymentManager
+from solana_payments.partial_payment import PartialPaymentManager
 
 async def manual_cleanup():
     # Инициализация
@@ -464,7 +446,7 @@ asyncio.run(manual_cleanup())
 ```python
 import asyncio
 from solana_payments import SolanaPayments, Config
-from partial_payment import start_cleanup_scheduler
+from solana_payments.partial_payment import start_cleanup_scheduler
 
 async def auto_cleanup():
     # Инициализация
@@ -493,7 +475,7 @@ asyncio.run(auto_cleanup())
 ```python
 from fastapi import FastAPI, BackgroundTasks
 from solana_payments import SolanaPayments, Config
-from partial_payment import PartialPaymentManager, start_cleanup_scheduler
+from solana_payments.partial_payment import PartialPaymentManager, start_cleanup_scheduler
 
 app = FastAPI()
 payments = SolanaPayments()
@@ -522,10 +504,12 @@ async def get_status():
 ### Config класс
 
 ```python
+from solana.rpc.commitment import Commitment
+
 class Config:
     # Solana настройки
     SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
-    SOLANA_COMMITMENT = "confirmed"
+    SOLANA_COMMITMENT = Commitment("confirmed")
     SOLANA_TIMEOUT = 30
     
     # MongoDB настройки
@@ -812,6 +796,6 @@ MIT License
 
 ---
 
-**Версия:** 2.0.0  
+**Версия:** 1.0.0  
 **Автор:** Solana Payments Team  
-**Дата:** 2024
+**Дата:** 2025

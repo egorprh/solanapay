@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import os
 import motor.motor_asyncio
 import logging
 
@@ -16,8 +17,11 @@ async def setup_database():
     """Настройка базы данных MongoDB"""
     
     # Подключение к MongoDB
-    client = motor.motor_asyncio.AsyncIOMotorClient("mongodb://localhost:27017")
-    db = client["solana_payments"]
+    mongo_url = os.environ.get("MONGODB_URL") or "mongodb://mongodb:27017"
+    mongo_db = os.environ.get("MONGODB_DATABASE") or "solana_payments"
+    logger.info(f"Connecting to MongoDB at {mongo_url}, db={mongo_db}")
+    client = motor.motor_asyncio.AsyncIOMotorClient(mongo_url)
+    db = client[mongo_db]
     
     try:
         # Создание индексов для коллекции платежей
@@ -36,10 +40,10 @@ async def setup_database():
         # Создание тестовых кошельков
         logger.info("Creating test wallets...")
         test_wallets = [
-            "7kFnAf3anAerYByZYEKAsPnz2eXwHFJWuZa4eV5r9wxT",
-            "5sq5a9g1VNSzgVQRTsjP29iHi4eAezMw52KrJR5g53jg",
-            "GJ8mMfgWm77L4uNDZvSaf2QhKn1hkgbNq3JZKLkvEx2H",
-            "8xk2kwnxjVP3hx3Hsunra3yJMrHoRU4As7Q37QeHHJk9"
+            "3PmrYZ9KD3GLLnmGjJYcuGmt3zq2BBG34JLUhoUv7ZSL",
+            "2kDfwYtSYiG18WJiTpsBKzBqAhVvDNhJjwvjw3nVsNN8",
+            "DppBmsoG5ciXsYMnMmdmGicGHepd36oZ6hwVysTTYyrk",
+            "EpufTXUZmndCdMX5CSwLTPeWbEVvpbbjjQMYSS7TDxYM"
         ]
         
         # Логируем предоставленные кошельки
