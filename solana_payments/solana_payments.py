@@ -76,7 +76,7 @@ class Config:
     
     # Настройки кошельков
     WALLET_POOL_SIZE = 100
-    WALLET_LOCK_TIMEOUT = 3600  # 1 час
+    WALLET_LOCK_TIMEOUT = 1800  # 30 минут
 
 
 class Payment(BaseModel):
