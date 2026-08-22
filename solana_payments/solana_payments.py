@@ -25,7 +25,11 @@ import json
 
 # Solana и блокчейн зависимости
 from solana.rpc.async_api import AsyncClient
-from solana.rpc.types import TokenAccountOpts
+try:
+    from solana.rpc.types import TokenAccountOpts
+except ImportError:
+    from solana.rpc.models import TokenAccountOpts
+
 from solders.pubkey import Pubkey as PublicKey
 from solana.rpc.commitment import Commitment
 

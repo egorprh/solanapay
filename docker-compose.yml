@@ -7,6 +7,12 @@ services:
       MONGO_INITDB_DATABASE: solana_payments
     volumes:
       - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   redis:
     image: redis:7-alpine
@@ -14,6 +20,12 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   bot:
     image: python:3.13-slim
@@ -26,16 +38,18 @@ services:
       # Для библиотеки solana_payments (используется ботом)
       MONGODB_URL: mongodb://mongodb:27017
       REDIS_URL: redis://redis:6379
-      # RPC по умолчанию — devnet; можно переопределить через .env
+      PYTHONPATH: /app
+      # RPC по умолчанию — mainnet; можно переопределить через .env
       SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+      PYTHONUNBUFFERED: "1"
     depends_on:
-      - mongodb
-      - redis
-    command: sh -c "pip install -r solana_payments/requirements.txt && pip install -r bot/requirements.txt && python bot/solana_payments_bot.py"
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "pip install -r solana_payments/requirements.txt && pip install -r bot/requirements.txt && python -m bot.bot"
     restart: unless-stopped
 
 volumes:
   mongodb_data:
   redis_data:
-
-

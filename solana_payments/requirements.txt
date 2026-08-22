@@ -2,8 +2,8 @@
 # Основные зависимости для работы с Solana и блокчейном
 
 # Solana SDK - официальная библиотека для работы с Solana
-solana>=0.36.9
-solders>=0.26.0
+solana==0.40.2
+solders>=0.28.0,<0.30.0
 
 # HTTP клиент для внешних API (CoinGecko, RPC вызовы)
 aiohttp>=3.9.5
@@ -12,13 +12,12 @@ aiohttp>=3.9.5
 pydantic>=2.8.2
 pydantic-core>=2.20.1
 
-# Асинхронный MongoDB драйвер
-motor>=3.7.1
-pymongo>=4.15.0
 dnspython>=2.8.0
 
 # Redis для управления состоянием кошельков
 redis>=6.4.0
+# Async MongoDB драйвер, используется в solana_payments для Motor-клиента
+motor>=3.7.1
 
 # Base58 кодирование для Solana адресов
 base58>=2.1.1
